@@ -4567,20 +4567,20 @@ def gui_mount_host_disk_normal():
                                    {"type": "Linux root",
                                     "name": "/dev/sdc3"}]}
 
-    def mock_find_current_disk(_):
+    def mock_find_current_disk():
         return "sda"
 
     call_backup = subprocess.call
     mkdtemp_backup = tempfile.mkdtemp
     get_list_of_disks_backup = ister_gui.get_list_of_disks
     get_disk_info_backup = ister_gui.get_disk_info
-    find_current_disk_backup = ister_gui.ChooseAction._find_current_disk
+    find_current_disk_backup = ister_gui.find_current_disk
 
     subprocess.call = mock_call
     tempfile.mkdtemp = mock_mkdtemp
     ister_gui.get_list_of_disks = mock_get_list_of_disks
     ister_gui.get_disk_info = mock_get_disk_info
-    ister_gui.ChooseAction._find_current_disk = mock_find_current_disk
+    ister_gui.find_current_disk = mock_find_current_disk
 
     commands = ['mount', '/dev/sdc3', '/tmp/ister-latest-temp',
                 '/tmp/ister-latest-temp/usr/lib/os-release', 'r',
@@ -4596,7 +4596,7 @@ def gui_mount_host_disk_normal():
     tempfile.mkdtemp = mkdtemp_backup
     ister_gui.get_list_of_disks = get_list_of_disks_backup
     ister_gui.get_disk_info = get_disk_info_backup
-    ister_gui.ChooseAction._find_current_disk = find_current_disk_backup
+    ister_gui.find_current_disk = find_current_disk_backup
 
     if chooseact.target_dir != "/tmp/ister-latest-temp":
         raise Exception("Target directory {} did not match expected "
@@ -4656,21 +4656,21 @@ def gui_mount_host_disk_no_boot_on_host():
                                    {"type": "Linux root",
                                     "name": "/dev/sdc3"}]}
 
-    def mock_find_current_disk(_):
+    def mock_find_current_disk():
         return "sda"
 
     call_backup = subprocess.call
     mkdtemp_backup = tempfile.mkdtemp
     get_list_of_disks_backup = ister_gui.get_list_of_disks
     get_disk_info_backup = ister_gui.get_disk_info
-    find_current_disk_backup = ister_gui.ChooseAction._find_current_disk
+    find_current_disk_backup = ister_gui.find_current_disk
     alert_backup = ister_gui.Alert
 
     subprocess.call = mock_call
     tempfile.mkdtemp = mock_mkdtemp
     ister_gui.get_list_of_disks = mock_get_list_of_disks
     ister_gui.get_disk_info = mock_get_disk_info
-    ister_gui.ChooseAction._find_current_disk = mock_find_current_disk
+    ister_gui.find_current_disk = mock_find_current_disk
     ister_gui.Alert = mock_alert
 
     commands = ['mount', '/dev/sdc3', '/tmp/ister-latest-temp',
@@ -4685,7 +4685,7 @@ def gui_mount_host_disk_no_boot_on_host():
     tempfile.mkdtemp = mkdtemp_backup
     ister_gui.get_list_of_disks = get_list_of_disks_backup
     ister_gui.get_disk_info = get_disk_info_backup
-    ister_gui.ChooseAction._find_current_disk = find_current_disk_backup
+    ister_gui.find_current_disk = find_current_disk_backup
     ister_gui.Alert = alert_backup
 
     if chooseact.target_dir != "/tmp/ister-latest-temp":

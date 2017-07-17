@@ -18,28 +18,17 @@
 # Boston, MA 02110-1301 USA
 
 # The array as default value is too handy here to worry about
-# pylint: disable=W0102
+# pylint: disable=dangerous-default-value
 # Intended manipulation of internal state of the UI
-# pylint: disable=W0212
+# pylint: disable=protected-access
 # global is handy here for now, but this could be fixed up
-# pylint: disable=W0603
-# Avoiding too many nested blocks is definitely a clean up todo
-# pylint: disable=R0101
-# Early on self not being used, will consider later on
-# pylint: disable=R0201
-# Use of too many returns is hard to avoid here, but it is something to
-# consider when refactoring
-# pylint: disable=R0911
-# Too many variables isn't really a problem though it looks a bit strange
-# pylint: disable=R0914
-# Use of too many statements isn't something to avoid for now
-# pylint: disable=R0915
+# pylint: disable=global-statement
 # broad exceptions are fine
-# pylint: disable=W0703
-# use of format strings this way is prefered unless convinced otherwise
-# pylint: disable=W1202
-# pylint: disable=C0302
-# pylint: disable=R0204
+# pylint: disable=broad-except
+# yeah this is pretty big
+# pylint: disable=too-many-lines
+# arguments differ is fine for the child classes
+# pylint: disable=arguments-differ
 
 import argparse
 import crypt
@@ -53,13 +42,10 @@ import sys
 import pprint
 import time
 import tempfile
-import shutil
 import ipaddress
+import signal
 import netifaces
 import pycurl
-import signal
-
-# pylint: disable=E0401
 import urwid
 
 import ister
@@ -108,6 +94,7 @@ def setup():
 
 def ister_wrapper(fn_name, *args):
     """Wrapper to dynamically call ister validations"""
+    # pylint: disable=no-member
     try:
         ister.__getattribute__(fn_name)(*args)
     except Exception as exc:
@@ -123,7 +110,7 @@ def get_disk_info(disk):
     lines = output.split('\n')
     expr = re.compile('^Device')
     # discard header...
-    while len(lines) > 0:
+    while lines:
         match = expr.match(lines[0])
         if match:
             break
@@ -211,7 +198,7 @@ def required_bundles(config):
     dictionary. Returns a list of bundle dictionaries containing 'name' and
     'desc' fields.
     """
-    required_bundles = []
+    reqd_bundles = []
 
     # configure core bundles (kernel, os-core, and os-core-update)
     # detect virtualization technology to determine which kernel to require
@@ -228,7 +215,7 @@ def required_bundles(config):
         kernel = {'name': 'kernel-native',
                   'desc': 'Required to run Clear Linux OS on baremetal'}
 
-    required_bundles.extend([
+    reqd_bundles.extend([
         {'name': 'os-core',
          'desc': 'Minimal packages to have Clear Linux OS fully '
                  'functional'},
@@ -246,14 +233,14 @@ def required_bundles(config):
     # 'telemetrics' will exist in config['Bundles'] if the user opted in. This
     # is the only way to select the telemetrics bundle, so make it required.
     if 'telemetrics' in config['Bundles']:
-        required_bundles.append(telemetrics)
+        reqd_bundles.append(telemetrics)
 
     # if an administrative user is defined, that user will need sudo to operate
     # the system.
     if config.get('Users'):
-        required_bundles.append(sysadmin_basic)
+        reqd_bundles.append(sysadmin_basic)
 
-    return required_bundles
+    return reqd_bundles
 
 
 def network_service_ready():
@@ -264,7 +251,7 @@ def network_service_ready():
                                            'status',
                                            'systemd-networkd',
                                            'systemd-resolved'])
-        except Exception as excep:
+        except Exception:
             return False
 
         if out.decode('utf-8').count('Active: active (running)') == 2:
@@ -273,6 +260,33 @@ def network_service_ready():
         time.sleep(i)
 
     return False
+
+
+def find_current_disk():
+    """
+    Find the current disk so it can be skipped when searching for a Linux
+    root
+    """
+    cmd = ['lsblk', '-l', '-o', 'NAME,MOUNTPOINT']
+    output = subprocess.check_output(cmd).decode('utf-8')
+    for line in output.split('\n'):
+        if '/' in line:
+            return line.split()[0]
+
+    return ''
+
+
+def find_dns():
+    """Find active DNS server by searching /etc/resolv.conf if it exists"""
+    content = ''
+    if os.path.exists('/etc/resolv.conf'):
+        with open('/etc/resolv.conf', 'r') as resolv:
+            content = resolv.readlines()
+
+    # just report the first nameserver
+    for line in content:
+        if 'nameserver' in line:
+            return line.split(' ')[1].strip()
 
 
 class Alert(object):
@@ -355,12 +369,14 @@ class Terminal(object):
         self.term.main_loop = loop
         self.term.keygrab = True
 
-    def quit(self, *args, **kwargs):
+    @staticmethod
+    def quit(*args, **kwargs):
         """Breaks the loop to continue"""
         del args, kwargs
         raise urwid.ExitMainLoop()
 
-    def handle_key(self, key):
+    @staticmethod
+    def handle_key(key):
         """It connects the signal, but does not do anything"""
         pass
 
@@ -372,17 +388,18 @@ class Terminal(object):
 class ButtonMenu(object):
     """Assemble the button menu - ultimately store it in self._ui"""
     # pylint: disable=R0903
-    def __init__(self, title, choices):
+    def __init__(self, title, choices, selection):
         self._response = ''  # The choice made by the user is stored here.
         self.choices = choices
-        self.title = title
-        self.construct()
+        self.selection = selection
+        self.construct(title)
 
-    def construct(self):
+    def construct(self, title):
+        """Construct the Button menu widgets"""
         # These will sit above the list box
-        self._frame_contents = [('pack', urwid.Divider()),
-                                ('pack', urwid.Text(self.title)),
-                                ('pack', urwid.Divider())]
+        frame_contents = [('pack', urwid.Divider()),
+                          ('pack', urwid.Text(title)),
+                          ('pack', urwid.Divider())]
         self._menu = []
         for choice in self.choices:
             label = choice if self.selection != choice else '* ' + choice
@@ -392,9 +409,9 @@ class ButtonMenu(object):
             self._menu.append(button)
 
         self._lb = NavListBox(urwid.SimpleFocusListWalker(self._menu), self)
-        self._frame_contents.append(self._lb)
-        self._frame_contents = urwid.Pile(self._frame_contents)
-        self._fgwin = urwid.Padding(self._frame_contents, left=2, right=2)
+        frame_contents.append(self._lb)
+        frame_contents = urwid.Pile(frame_contents)
+        self._fgwin = urwid.Padding(frame_contents, left=2, right=2)
         self._ui = urwid.Overlay(self._fgwin,
                                  urwid.AttrMap(urwid.SolidFill(u' '), 'bg'),
                                  align='center',
@@ -404,7 +421,7 @@ class ButtonMenu(object):
         self._ui = urwid.AttrMap(self._ui, 'banner')
 
     # This callback is registered with urwid.MainLoop and gives us the
-    # opportnity to intercept keystrokes and handle things like tabs.
+    # opportunity to intercept keystrokes and handle things like tabs.
     # In theory the callback for each keystroke should be function
     # fragment or class method but I just handled them in-line here.
     # Unhandled input is returned back to MainLoop for default handlers to
@@ -421,7 +438,7 @@ class ButtonMenu(object):
         else:
             return keys
 
-    def _item_chosen(self, button, choice):
+    def _item_chosen(self, button, _):
         """ Callback trigged by button activation  """
         del button
         self._response = 'Next'
@@ -725,10 +742,10 @@ class ProcessStep(object):
             exit(0)
         if action in self.action_map:
             return self.action_map[action]
-        else:
-            tmp = Alert(u'Error!', '"{}" not implemented yet'.format(action))
-            tmp.do_alert()
-            return self
+
+        tmp = Alert(u'Error!', '"{}" not implemented yet'.format(action))
+        tmp.do_alert()
+        return self
 
     def set_action(self, action, target, **_):
         """Sets process step to be matched by a key"""
@@ -749,7 +766,8 @@ class ProcessStep(object):
 
         return self._action
 
-    def run_ui(self):
+    @staticmethod
+    def run_ui():
         """Method to run the ui and return the action"""
         return 'Next'
 
@@ -783,7 +801,8 @@ class ConditionalStep(ProcessStep):
         """Sets process step to be matched by a key"""
         self.action_map[action] = (target, target_false)
 
-    def validate_condition(self):
+    @staticmethod
+    def validate_condition():
         """Abstract method to validate step condition"""
         return True
 
@@ -851,19 +870,23 @@ class KeyboardSelection(ButtonMenu):
     def __init__(self):
         self.action_map = {}
         self._action = None
-        header = 'Keyboard Selection\n\n' \
-                 'Defaults to us\n' \
-                 'Current selection indicated by *\n' \
-                 'ESC, left arrow, q      - return to previous screen\n' \
-                 'tab, right arrow        - proceed to next screen without changing keyboard map\n' \
-                 'j, k, up/down arrow     - navigate the list\n' \
-                 'enter                   - set keyboard mapping to selection and proceed'
+        self.header = ('Keyboard Selection\n\n'
+                       'Defaults to us\n'
+                       'Current selection indicated by *\n'
+                       'ESC, left arrow, q      - return to previous screen\n'
+                       'tab, right arrow        - proceed to next screen '
+                       'without changing keyboard map\n'
+                       'j, k, up/down arrow     - navigate the list\n'
+                       'enter                   - set keyboard mapping to '
+                       'selection and proceed')
         self.selection = 'us'
-        super(KeyboardSelection, self).__init__(header, self.get_keyboards())
+        super(KeyboardSelection, self).__init__(self.header,
+                                                self.get_keyboards(),
+                                                self.selection)
 
-    def handler(self, config):
+    def handler(self, _):
         """Handles all the work for the current UI"""
-        self.construct()
+        self.construct(self.header)
         if self._ui:
             self.run_ui()
 
@@ -889,10 +912,10 @@ class KeyboardSelection(ButtonMenu):
             exit(0)
         if action in self.action_map:
             return self.action_map[action]
-        else:
-            tmp = Alert(u'Error!', '"{}" not implemented yet'.format(action))
-            tmp.do_alert()
-            return self
+
+        tmp = Alert(u'Error!', '"{}" not implemented yet'.format(action))
+        tmp.do_alert()
+        return self
 
     @staticmethod
     def get_keyboards():
@@ -928,9 +951,9 @@ class NavListBox(urwid.ListBox):
     """
     Screen to allow user to select keyboard layout for installer
     """
-    def __init__(self, body, ps):
-        self.ps = ps
-        self.ps._action = None
+    def __init__(self, body, press):
+        self.press = press
+        self.press._action = None
         super(NavListBox, self).__init__(body)
 
     def keypress(self, size, key):
@@ -938,7 +961,6 @@ class NavListBox(urwid.ListBox):
         # pylint: disable=E0203
         # pylint: disable=W0201
         # we will handle the following keys ourselves, don't call super
-        #Alert('key', key).do_alert()
         if key not in ['tab', 'j', 'k', 'q', 'right', 'left', 'esc']:
             key = super(NavListBox, self).keypress(size, key)
         elif key == 'j':
@@ -947,10 +969,10 @@ class NavListBox(urwid.ListBox):
             key = super(NavListBox, self).keypress(size, 'up')
 
         if key in ['tab', 'right']:
-            self.ps._action = 'Next'
+            self.press._action = 'Next'
             raise urwid.ExitMainLoop
         elif key in ['esc', 'left', 'q']:
-            self.ps._action = 'Previous'
+            self.press._action = 'Previous'
             raise urwid.ExitMainLoop
         else:
             return key
@@ -968,7 +990,7 @@ class ChooseAction(ProcessStep):
         }
         self._clicked = None
         self.error = False
-        self.current = self._find_current_disk()
+        self.current = find_current_disk()
         self.target_dir = None
         self.progress = urwid.Text('Step {} of {}'.format(cur_step, tot_steps))
 
@@ -1085,19 +1107,6 @@ class ChooseAction(ProcessStep):
         self._umount_host_disk(root_part, boot_part)
         self.error = False
         self._action = 'return'
-
-    def _find_current_disk(self):
-        """
-        Find the current disk so it can be skipped when searching for a Linux
-        root
-        """
-        cmd = ['lsblk', '-l', '-o', 'NAME,MOUNTPOINT']
-        output = subprocess.check_output(cmd).decode('utf-8')
-        for line in output.split('\n'):
-            if '/' in line:
-                return line.split()[0]
-
-        return ''
 
     def _mount_host_disk(self, config):
         """Search for and mount the host os disk"""
@@ -1232,7 +1241,7 @@ class NetworkControl(object):
             mask_res = 'none found'
             ip_res = 'none found'
 
-        dns_res = self.find_dns()
+        dns_res = find_dns()
         if not dns_res:
             dns_res = 'none found'
 
@@ -1306,18 +1315,6 @@ class NetworkControl(object):
         for interface in addrs:
             if interface.startswith('e'):
                 return (interface, addrs[interface], mask)
-
-    def find_dns(self):
-        """Find active DNS server by searching /etc/resolv.conf if it exists"""
-        content = ''
-        if os.path.exists('/etc/resolv.conf'):
-            with open('/etc/resolv.conf', 'r') as resolv:
-                content = resolv.readlines()
-
-        # just report the first nameserver
-        for line in content:
-            if 'nameserver' in line:
-                return line.split(' ')[1].strip()
 
     def _activate_button(self, edit, new_text):
         # pylint: disable=too-many-branches
@@ -1413,7 +1410,8 @@ class NetworkControl(object):
         self.set_static_edits()
         raise urwid.ExitMainLoop()
 
-    def _restart_networkd_resolved(self):
+    @staticmethod
+    def _restart_networkd_resolved():
         """Restart the network services then poll systemctl status output until
         both are back up"""
         try:
@@ -1603,12 +1601,13 @@ class NetworkRequirements(ProcessStep):
         try:
             ipaddress.ip_address(self.netcontrol.static_ip_e.get_edit_text())
             ipaddress.ip_address(self.netcontrol.gateway_e.get_edit_text())
-        except:
+        except ValueError:
             # the main loop is waiting on this method to exit so it can report
             # the error
             raise urwid.ExitMainLoop()
 
-        if self.netcontrol.interface_e.get_edit_text() not in self.netcontrol.ifaceaddrs.keys():
+        ifaces = self.netcontrol.ifaceaddrs.keys()
+        if self.netcontrol.interface_e.get_edit_text() not in ifaces:
             # the main loop is waiting on this method to exit so it can report
             # the error
             raise urwid.ExitMainLoop()
@@ -1619,14 +1618,17 @@ class NetworkRequirements(ProcessStep):
 
         with open(path + '10-en-static.network', 'w') as nfile:
             nfile.write('[Match]\n')
-            nfile.write('Name={}\n\n'.format(self.netcontrol.interface_e.get_edit_text()))
+            nfile.write('Name={}\n\n'.format(
+                self.netcontrol.interface_e.get_edit_text()))
             nfile.write('[Network]\n')
             nfile.write('Address={}/{}\n'.format(
                 self.netcontrol.static_ip_e.get_edit_text(),
                 compute_mask(self.netcontrol.mask_e.get_edit_text())))
-            nfile.write('Gateway={}\n'.format(self.netcontrol.gateway_e.get_edit_text()))
+            nfile.write('Gateway={}\n'.format(
+                self.netcontrol.gateway_e.get_edit_text()))
             if self.netcontrol.dns_e.get_edit_text():
-                nfile.write('DNS={}\n'.format(self.netcontrol.dns_e.get_edit_text()))
+                nfile.write('DNS={}\n'.format(
+                    self.netcontrol.dns_e.get_edit_text()))
 
         self.netcontrol._restart_networkd_resolved()
         raise urwid.ExitMainLoop()
@@ -1950,7 +1952,7 @@ class SelectDeviceStep(ProcessStep):
 
     def build_ui_widgets(self):
         self._ui_widgets = [urwid.Text(self.progress)]
-        if len(self.disks) == 0:
+        if not self.disks:
             widget = urwid.Text(u"No free devices found.")
             self._ui_widgets.append(widget)
         else:
@@ -2052,7 +2054,7 @@ class SetMountEachStep(ProcessStep):
             _format = True
             Alert('Information', "Format required for '/' partition, setting "
                   "format option...").do_alert()
-        if self._action == 'Next' and len(point) > 0 and point[0] == '/':
+        if self._action == 'Next' and point and point.startswith('/'):
             for key in list(config.keys()):
                 if config[key]['part'] == self._partition:
                     del config[key]
@@ -2075,16 +2077,17 @@ class SetMountEachStep(ProcessStep):
 
 class MountPointsStep(ProcessStep):
     """UI which displays the partitions of the selected disk"""
+    # pylint: disable=too-many-instance-attributes
     def __init__(self, cur_step, tot_steps):
         super(MountPointsStep, self).__init__()
         self.progress = urwid.Text('Step {} of {}'.format(cur_step, tot_steps))
+        self.display_fmt = '{0:12}{1:12}{2:30}{3:20}{4:6}'
         self.mount_d = {}
         self.choices = None
 
     def handler(self, config):
         # pylint: disable=R0914
         mount_d = self.mount_d
-        self.display_fmt = '{0:12}{1:12}{2:30}{3:20}{4:6}'
         self.choices = self._get_partitions(config)
         # if the user went back to cgdisk and deleted a partition, we have to
         # detect that here. After we get a list to remove, remove each key
@@ -2155,7 +2158,7 @@ class MountPointsStep(ProcessStep):
 
     def build_ui_widgets(self, *_):
         self._ui_widgets = [self.progress]
-        if len(self.choices) == 0:
+        if not self.choices:
             widget = urwid.Text(u"No partitions found.")
             self._ui_widgets.append(widget)
         else:
@@ -2201,7 +2204,8 @@ class MountPointsStep(ProcessStep):
                 'mount': point})
             self.mount_d = mount_d
 
-    def _search_swap(self, choices, config, mount_d):
+    @staticmethod
+    def _search_swap(choices, config, mount_d):
         for choice in choices:
             part = choice.split()[0]
             for point in mount_d:
@@ -2254,6 +2258,7 @@ class MountPointsStep(ProcessStep):
 
 class BundleSelectorStep(ProcessStep):
     """UI which displays the bundle list to be installed"""
+    # pylint: disable=too-many-instance-attributes
     def __init__(self, cur_step=None, tot_steps=None):
         super(BundleSelectorStep, self).__init__()
         self.bundles = [{'name': 'editors',
@@ -2263,13 +2268,15 @@ class BundleSelectorStep(ProcessStep):
                         {'name': 'desktop-autostart',
                          'desc': 'UI that automatically starts on boot'},
                         {'name': 'dev-utils',
-                         'desc': 'Utilities to assist application development'}]
+                         'desc': 'Utilities to assist application '
+                                 'development'}]
         self.default_bundles = [{'name': 'network-basic',
                                  'desc': 'Run network utilities and modify '
                                          'network settings'},
                                 {'name': 'sysadmin-basic',
                                  'desc': 'Run common utilities useful for '
                                          'managing a system'}]
+        self.required_bundles = []
         self.default_set = False
         self.sysadmin_basic_state = True
         if cur_step and tot_steps:
@@ -2283,7 +2290,7 @@ class BundleSelectorStep(ProcessStep):
         sysadmin_reqd = any(bundle['name'] == 'sysadmin-basic'
                             for bundle in self.required_bundles)
         sysadmin_bundle = any(bundle['name'] == 'syadmin-basic'
-                            for bundle in self.bundles)
+                              for bundle in self.bundles)
         sysadmin_def = any(bundle['name'] == 'sysadmin-basic'
                            for bundle in self.default_bundles)
         sysadmin_basic = {'name': 'sysadmin-basic',
@@ -2319,18 +2326,19 @@ class BundleSelectorStep(ProcessStep):
         self.build_ui_widgets(config)
         self.build_ui()
         self._action = self.run_ui()
-        for widget in self._ui_widgets[2:]:
-            if isinstance(widget, urwid.Columns):
-                for content in widget.contents:
-                    if isinstance(content[0], urwid.CheckBox):
-                        bundle = content[0].get_label()
-                        bundle = bundle.split()[0]
-                        if content[0].get_state():
-                            if bundle not in config['Bundles']:
-                                config['Bundles'].append(bundle)
-                        else:
-                            if bundle in config['Bundles']:
-                                config['Bundles'].remove(bundle)
+        wgen = (w for w in self._ui_widgets[2:]
+                if isinstance(w, urwid.Columns))
+        for widget in wgen:
+            for content in widget.contents:
+                if isinstance(content[0], urwid.CheckBox):
+                    bundle = content[0].get_label()
+                    bundle = bundle.split()[0]
+                    if content[0].get_state():
+                        if bundle not in config['Bundles']:
+                            config['Bundles'].append(bundle)
+                    else:
+                        if bundle in config['Bundles']:
+                            config['Bundles'].remove(bundle)
 
         # update only if user had chance to unselect - the user had a chance to
         # unselect the bundle if it is not in the required_bundles list.
@@ -2428,7 +2436,7 @@ class ConfirmUserMenu(ProcessStep):
 
 class UserConfigurationStep(ProcessStep):
     """UI to gather the user info"""
-    # pylint: disable=R0902
+    # pylint: disable=too-many-instance-attributes
     def __init__(self, cur_step, tot_steps):
         super(UserConfigurationStep, self).__init__()
         fmt = '{0:>25}'
@@ -2592,7 +2600,7 @@ class ConfirmDHCPMenu(ProcessStep):
 
 
 class StaticIpStep(ProcessStep):
-    # pylint: disable=R0902
+    # pylint: disable=too-many-instance-attributes
     """UI to gather the static ip configuration"""
     def __init__(self, cur_step, tot_steps):
         super(StaticIpStep, self).__init__()
@@ -2606,7 +2614,7 @@ class StaticIpStep(ProcessStep):
         self.ip_res = ''
         self.mask_res = ''
         self.dns_res = ''
-        self.gate_res = ''
+        self.gate_r = ''
 
     def _save_config(self, _):
         """Save static IP configuration to config dict"""
@@ -2676,12 +2684,12 @@ class StaticIpStep(ProcessStep):
         if_ip = self.netcontrol.find_interface_ip()
         self.ip_res = if_ip[1] if if_ip else ''
         self.mask_res = if_ip[2] if if_ip else ''
-        self.dns_res = self.netcontrol.find_dns() or ''
+        self.dns_res = find_dns() or ''
         # pylint: disable=E1103
         try:
-            self.gate_res = netifaces.gateways()['default'][netifaces.AF_INET][0]
+            self.gate_r = netifaces.gateways()['default'][netifaces.AF_INET][0]
         except Exception:
-            self.gate_res = ''
+            self.gate_r = ''
 
     @staticmethod
     def static_set():
@@ -2690,10 +2698,14 @@ class StaticIpStep(ProcessStep):
 
     def setup_netcontrol(self, det=False):
         """Pre-populate edit fields with saved data if available"""
-        self.netcontrol.static_ip_e.set_edit_text(self.ip_res if det else self.static_ip_s)
-        self.netcontrol.mask_e.set_edit_text(self.mask_res if det else self.mask_s)
-        self.netcontrol.gateway_e.set_edit_text(self.gate_res if det else self.gateway_s)
-        self.netcontrol.dns_e.set_edit_text(self.dns_res if det else self.dns_s)
+        self.netcontrol.static_ip_e.set_edit_text(self.ip_res if det
+                                                  else self.static_ip_s)
+        self.netcontrol.mask_e.set_edit_text(self.mask_res if det
+                                             else self.mask_s)
+        self.netcontrol.gateway_e.set_edit_text(self.gate_r if det
+                                                else self.gateway_s)
+        self.netcontrol.dns_e.set_edit_text(self.dns_res if det
+                                            else self.dns_s)
 
     def run_ui(self):
         return self._ui.do_form()
@@ -2776,6 +2788,8 @@ class Installation(object):
             self._exit(-1, 'Template file does not exist')
 
     def _init_actions(self):
+        # pylint: disable=too-many-locals
+        # pylint: disable=too-many-statements
         # auto install assumed
         keyboard_select = KeyboardSelection()
         network_requirements = NetworkRequirements(1, 6,
@@ -2881,8 +2895,7 @@ class Installation(object):
         i = 0
         while not isinstance(step, RunInstallation):
             action = step.handler(self.installation_d)
-            self.logger.debug(
-                "Stepping to {0} screen".format(type(step).__name__))
+            self.logger.debug("Stepping to % screen", type(step).__name__)
             self.logger.debug(self.installation_d)
             if action == 'Abort' or action == 'Exit':
                 self._exit(0)
@@ -2996,6 +3009,7 @@ def main():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     ins = Installation(**vars(args))
     ins.run()
+
 
 if __name__ == '__main__':
     main()
