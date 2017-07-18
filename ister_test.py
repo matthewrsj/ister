@@ -65,6 +65,7 @@ import urllib.request as request
 
 import ister
 import ister_gui
+import ister_gui
 
 COMMAND_RESULTS = []
 

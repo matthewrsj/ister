@@ -28,6 +28,7 @@ next_dev=$(sudo losetup -f --show -P $1)
 sudo /usr/bin/mount ${next_dev}p2 $mnt
 sudo cp ister_gui.py ${mnt}/usr/bin/ister_gui.py
 sudo cp ister.py ${mnt}/usr/bin/ister.py
+sudo cp os_utils.py ${mnt}/usr/bin/os-utils.py
 sudo /usr/bin/umount $mnt
 sudo /usr/bin/losetup -D
 echo "$1 up to date with latest gui and installer"

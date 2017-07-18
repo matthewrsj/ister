@@ -40,7 +40,6 @@ import subprocess
 import threading
 import sys
 import pprint
-import time
 import tempfile
 import ipaddress
 import signal
@@ -73,33 +72,6 @@ PERCENTAGE_W = 90
 PERCENTAGE_H = 70
 LINES = 0
 COLUMNS = 0
-
-
-def setup():
-    """Initialization method for getting screen dimensions"""
-    global PERCENTAGE_W, PERCENTAGE_H, LINES, COLUMNS
-    rows, columns = os.popen('stty size', 'r').read().split()
-    rows, columns = int(rows), int(columns)
-    if rows < MIN_HEIGHT:
-        PERCENTAGE_H = 100
-    if columns < MIN_WIDTH:
-        PERCENTAGE_W = 100
-    LINES = int(rows * PERCENTAGE_H / 100)
-    COLUMNS = int(columns * PERCENTAGE_W / 100)
-    if LINES > MAX_HEIGHT:
-        LINES = int(MAX_HEIGHT)
-    if COLUMNS > MAX_WIDTH:
-        COLUMNS = int(MAX_WIDTH)
-
-
-def ister_wrapper(fn_name, *args):
-    """Wrapper to dynamically call ister validations"""
-    # pylint: disable=no-member
-    try:
-        ister.__getattribute__(fn_name)(*args)
-    except Exception as exc:
-        return exc
-    return None
 
 
 def get_disk_info(disk):
@@ -177,6 +149,120 @@ def compute_mask(mask_ip):
     return sum([bin(int(x)).count("1") for x in mask_ip.split(".")])
 
 
+def network_service_ready():
+    """Check network status with increasing sleep times on each failure"""
+    for i in [.1, 1, 2, 4]:
+        try:
+            out = subprocess.check_output(['/usr/bin/systemctl',
+                                           'status',
+                                           'systemd-networkd',
+                                           'systemd-resolved'])
+        except subprocess.CalledProcessError:
+            return False
+
+        if out.decode('utf-8').count('Active: active (running)') == 2:
+            return True
+
+        time.sleep(i)
+
+    return False
+
+
+def find_current_disk():
+    """
+    Find the current disk so it can be skipped when searching for a Linux
+    root
+    """
+    cmd = ['lsblk', '-l', '-o', 'NAME,MOUNTPOINT']
+    output = subprocess.check_output(cmd).decode('utf-8')
+    for line in output.split('\n'):
+        if '/' in line:
+            return line.split()[0]
+
+    return ''
+
+
+def find_dns():
+    """Find active DNS server by searching /etc/resolv.conf if it exists"""
+    content = ''
+    if os.path.exists('/etc/resolv.conf'):
+        with open('/etc/resolv.conf', 'r') as resolv:
+            content = resolv.readlines()
+
+    # just report the first nameserver
+    for line in content:
+        if 'nameserver' in line:
+            return line.split(' ')[1].strip()
+
+
+def get_keyboards():
+    """
+    Get list of keyboards from localectl to create dropdown selection
+    """
+    try:
+        out = subprocess.check_output(['localectl',
+                                       'list-keymaps']).decode('utf-8')
+    except subprocess.CalledProcessError:
+        return ['us']
+
+    # 'us' is default and should be first in the list
+    kbs = ['us']
+    # remove trailing empty line with [:-1]
+    # extend by each keyboard in localectl list-keymaps output
+    kbs.extend(k for k in out.split('\n')[:-1] if k != 'us')
+    return kbs
+
+
+def set_keyboard(keyboard):
+    """
+    Set system keymapping to keyboard
+    """
+    subprocess.call(['localectl', 'set-keymap', keyboard])
+
+
+def restart_networkd_resolved():
+    """Restart the network services then poll systemctl status output until
+    both are back up"""
+    # restart systemd-networkd and systemd-resolved
+    subprocess.call(['/usr/bin/systemctl', 'restart',
+                     'systemd-networkd', 'systemd-resolved'])
+
+    if not network_service_ready():
+        raise Exception('Unable to restart network services')
+
+
+def static_set():
+    """ Return a True if static has been configured on machine """
+    return os.path.exists('/etc/systemd/network/10-en-static.network')
+
+
+def setup():
+    """Initialization method for getting screen dimensions"""
+    global PERCENTAGE_W, PERCENTAGE_H, LINES, COLUMNS
+    rows, columns = os.popen('stty size', 'r').read().split()
+    rows, columns = int(rows), int(columns)
+    if rows < MIN_HEIGHT:
+        PERCENTAGE_H = 100
+    if columns < MIN_WIDTH:
+        PERCENTAGE_W = 100
+    LINES = int(rows * PERCENTAGE_H / 100)
+    COLUMNS = int(columns * PERCENTAGE_W / 100)
+    if LINES > MAX_HEIGHT:
+        LINES = int(MAX_HEIGHT)
+    if COLUMNS > MAX_WIDTH:
+        COLUMNS = int(MAX_WIDTH)
+
+
+def ister_wrapper(fn_name, *args):
+    """Wrapper to dynamically call ister validations"""
+    # pylint: disable=no-member
+    try:
+        ister.__getattribute__(fn_name)(*args)
+    except Exception as exc:
+        return exc
+    return None
+
+
 # pylint: disable=too-many-arguments
 # six is reasonable since this function in turn calls three other functions
 def ister_button(message, on_press=None, user_data=None,
@@ -243,50 +329,36 @@ def required_bundles(config):
     return reqd_bundles
 
 
-def network_service_ready():
-    """Check network status with increasing sleep times on each failure"""
-    for i in [.1, 1, 2, 4]:
-        try:
-            out = subprocess.check_output(['/usr/bin/systemctl',
-                                           'status',
-                                           'systemd-networkd',
-                                           'systemd-resolved'])
-        except Exception:
-            return False
-
-        if out.decode('utf-8').count('Active: active (running)') == 2:
-            return True
-
-        time.sleep(i)
-
-    return False
-
-
-def find_current_disk():
+def search_swap(choices, config, mount_d):
     """
-    Find the current disk so it can be skipped when searching for a Linux
-    root
+    Search for the name of the swap partition to add to config
     """
-    cmd = ['lsblk', '-l', '-o', 'NAME,MOUNTPOINT']
-    output = subprocess.check_output(cmd).decode('utf-8')
-    for line in output.split('\n'):
-        if '/' in line:
-            return line.split()[0]
-
-    return ''
-
-
-def find_dns():
-    """Find active DNS server by searching /etc/resolv.conf if it exists"""
-    content = ''
-    if os.path.exists('/etc/resolv.conf'):
-        with open('/etc/resolv.conf', 'r') as resolv:
-            content = resolv.readlines()
-
-    # just report the first nameserver
-    for line in content:
-        if 'nameserver' in line:
-            return line.split(' ')[1].strip()
+    for choice in choices:
+        part = choice.split()[0]
+        for point in mount_d:
+            if part == mount_d[point]['part']:
+                break
+        else:
+            output = subprocess.check_output('blkid | grep {0}'
+                                             .format(part),
+                                             shell=True).decode('utf-8')
+            pttr = 'TYPE="'
+            if pttr in output:
+                idx = output.index(pttr)
+                output = output[idx + len(pttr):]
+                output = output[:output.index('"')]
+                if output == 'swap':
+                    disk = ''.join(x for x in part if not x.isdigit())
+                    part = part[len(disk):]
+                    config['PartitionLayout'].append({
+                        'disk': disk,
+                        'partition': part,
+                        'size': '1M',
+                        'type': 'swap'})
+                    config['FilesystemTypes'].append({
+                        'disk': disk,
+                        'partition': part,
+                        'type': 'swap'})
 
 
 class Alert(object):
@@ -364,7 +436,7 @@ class Terminal(object):
         loop = urwid.MainLoop(
             mainframe,
             handle_mouse=False,
-            unhandled_input=self.handle_key)
+            unhandled_input=lambda: None)
 
         self.term.main_loop = loop
         self.term.keygrab = True
@@ -374,11 +446,6 @@ class Terminal(object):
         """Breaks the loop to continue"""
         del args, kwargs
         raise urwid.ExitMainLoop()
-
-    @staticmethod
-    def handle_key(key):
-        """It connects the signal, but does not do anything"""
-        pass
 
     def main_loop(self):
         """Enters the loop to grab focus on the terminal UI"""
@@ -780,33 +847,6 @@ class ProcessStep(object):
         self._ui = True
 
 
-class ConditionalStep(ProcessStep):
-    """Defines a conditional ProcessStep"""
-    def get_next_step(self, action):
-        """Returns the process step matched by action"""
-        if action == 'Exit':
-            exit(0)
-        if action in self.action_map:
-            targets = self.action_map[action]
-            if targets[1]:
-                if not self.validate_condition():
-                    return targets[1]
-            return targets[0]
-        else:
-            tmp = Alert(u'Error!', '"{}" not implemented yet'.format(action))
-            tmp.do_alert()
-            return self
-
-    def set_action(self, action, target, target_false=None, **_):
-        """Sets process step to be matched by a key"""
-        self.action_map[action] = (target, target_false)
-
-    @staticmethod
-    def validate_condition():
-        """Abstract method to validate step condition"""
-        return True
-
-
 class SplashScreen(ProcessStep):
     # pylint: disable=R0902
     """
@@ -881,7 +921,7 @@ class KeyboardSelection(ButtonMenu):
                        'selection and proceed')
         self.selection = 'us'
         super(KeyboardSelection, self).__init__(self.header,
-                                                self.get_keyboards(),
+                                                get_keyboards(),
                                                 self.selection)
 
     def handler(self, _):
@@ -902,7 +942,12 @@ class KeyboardSelection(ButtonMenu):
     def _item_chosen(self, button, choice):
         """ Callback trigged by button activation  """
         self._action = 'Next'
-        self.set_keyboard(choice)
+        try:
+            set_keyboard(choice)
+        except Exception:
+            Alert('Error!',
+                  'Unable to set keymapping to {}'.format(choice)).do_alert()
+
         self.selection = choice
         raise urwid.ExitMainLoop()
 
@@ -916,35 +961,6 @@ class KeyboardSelection(ButtonMenu):
         tmp = Alert(u'Error!', '"{}" not implemented yet'.format(action))
         tmp.do_alert()
         return self
-
-    @staticmethod
-    def get_keyboards():
-        """
-        Get list of keyboards from localectl to create dropdown selection
-        """
-        try:
-            out = subprocess.check_output(['localectl',
-                                           'list-keymaps']).decode('utf-8')
-        except Exception:
-            return ['us']
-
-        # 'us' is default and should be first in the list
-        kbs = ['us']
-        # remove trailing empty line with [:-1]
-        # extend by each keyboard in localectl list-keymaps output
-        kbs.extend(k for k in out.split('\n')[:-1] if k != 'us')
-        return kbs
-
-    @staticmethod
-    def set_keyboard(keyboard):
-        """
-        Set system keymapping to keyboard
-        """
-        try:
-            subprocess.call(['localectl', 'set-keymap', keyboard])
-        except Exception:
-            Alert('Error!',
-                  'Unable to set keymapping to {}'.format(keyboard)).do_alert()
 
 
 class NavListBox(urwid.ListBox):
@@ -1402,29 +1418,17 @@ class NetworkControl(object):
         except FileNotFoundError:
             pass
 
-        self._restart_networkd_resolved()
+        try:
+            restart_networkd_resolved()
+        except Exception as err:
+            Alert('Error!', str(err)).do_alert()
+            raise urwid.ExitMainLoop()
 
         # set necessary flags, then reset static edit text.
         self.static_ready = False
         self.reset = True
         self.set_static_edits()
         raise urwid.ExitMainLoop()
-
-    @staticmethod
-    def _restart_networkd_resolved():
-        """Restart the network services then poll systemctl status output until
-        both are back up"""
-        try:
-            # restart systemd-networkd and systemd-resolved
-            subprocess.call(['/usr/bin/systemctl', 'restart',
-                             'systemd-networkd', 'systemd-resolved'])
-
-            if not network_service_ready():
-                raise Exception('Unable to restart network services')
-
-        except Exception as err:
-            Alert('Error!', str(err)).do_alert()
-            raise urwid.ExitMainLoop()
 
 
 class NetworkRequirements(ProcessStep):
@@ -1630,7 +1634,11 @@ class NetworkRequirements(ProcessStep):
                 nfile.write('DNS={}\n'.format(
                     self.netcontrol.dns_e.get_edit_text()))
 
-        self.netcontrol._restart_networkd_resolved()
+        try:
+            restart_networkd_resolved()
+        except Exception as err:
+            Alert('Error!', str(err)).do_alert()
+
         raise urwid.ExitMainLoop()
 
     def _set_proxy(self, _):
@@ -2138,7 +2146,7 @@ class MountPointsStep(ProcessStep):
         self._save_config(config, mount_d)
         partitions = [choice for choice in self.choices
                       if choice not in other_options]
-        self._search_swap(partitions, config, mount_d)
+        search_swap(partitions, config, mount_d)
         exc = ister_wrapper('validate_disk_template', config)
         if exc is not None:
             return exc
@@ -2203,35 +2211,6 @@ class MountPointsStep(ProcessStep):
                 'partition': part,
                 'mount': point})
             self.mount_d = mount_d
-
-    @staticmethod
-    def _search_swap(choices, config, mount_d):
-        for choice in choices:
-            part = choice.split()[0]
-            for point in mount_d:
-                if part == mount_d[point]['part']:
-                    break
-            else:
-                output = subprocess.check_output('blkid | grep {0}'
-                                                 .format(part),
-                                                 shell=True).decode('utf-8')
-                pttr = 'TYPE="'
-                if pttr in output:
-                    idx = output.index(pttr)
-                    output = output[idx + len(pttr):]
-                    output = output[: output.index('"')]
-                    if output == 'swap':
-                        disk = ''.join(x for x in part if not x.isdigit())
-                        part = part[len(disk):]
-                        config['PartitionLayout'].append({
-                            'disk': disk,
-                            'partition': part,
-                            'size': '1M',
-                            'type': 'swap'})
-                        config['FilesystemTypes'].append({
-                            'disk': disk,
-                            'partition': part,
-                            'type': 'swap'})
 
     def _get_partitions(self, config):
         result = list()
@@ -2640,7 +2619,7 @@ class StaticIpStep(ProcessStep):
         # Only pre-populate with local network settings if static has been
         # configured by the user and there is no saved 'Static_IP' in the
         # install configuration.
-        det = self.static_set() and not config.get('Static_IP')
+        det = static_set() and not config.get('Static_IP')
         if det:
             # gather network data from installer image
             self.find_network()
@@ -2690,11 +2669,6 @@ class StaticIpStep(ProcessStep):
             self.gate_r = netifaces.gateways()['default'][netifaces.AF_INET][0]
         except Exception:
             self.gate_r = ''
-
-    @staticmethod
-    def static_set():
-        """ Return a True if static has been configured on machine """
-        return os.path.exists('/etc/systemd/network/10-en-static.network')
 
     def setup_netcontrol(self, det=False):
         """Pre-populate edit fields with saved data if available"""
